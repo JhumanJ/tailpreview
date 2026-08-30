@@ -1,0 +1,27 @@
+version: 1
+
+# Optional. The CLI derives <repository>-<branch> when omitted.
+name: example-preview
+
+# Routes are evaluated exactly in this order. A catch-all must be last.
+routes:
+  - path: /api/*
+    upstream: ${API_URL}
+    strip_prefix: false
+
+  - path: /ws/*
+    upstream: ${WEBSOCKET_URL}
+
+  - path: /*
+    upstream: ${FRONTEND_URL}
+
+# Scalar checks accept 200-399. Mapping form customizes the status range.
+health:
+  - ${FRONTEND_URL}
+  - url: ${API_URL}/health
+    min_code: 200
+    max_code: 399
+
+ttl:
+  idle: 24h
+  max_age: 168h

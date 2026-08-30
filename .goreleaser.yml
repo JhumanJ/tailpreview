@@ -1,0 +1,58 @@
+version: 2
+
+project_name: tailpreview
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: tailpreview
+    main: ./cmd/tailpreview
+    binary: tailpreview
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/jhumanj/tailpreview/internal/buildinfo.Version={{.Version}}
+      - -X github.com/jhumanj/tailpreview/internal/buildinfo.Commit={{.Commit}}
+      - -X github.com/jhumanj/tailpreview/internal/buildinfo.Date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+homebrew_casks:
+  - name: tailpreview
+    repository:
+      owner: jhumanj
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/jhumanj/tailpreview
+    description: Private, agent-friendly previews for localhost services over Tailscale
+    license: MIT
+    binaries:
+      - tailpreview
+    dependencies:
+      - formula: caddy
+    caveats: |
+      Tailscale must be installed, connected, and available on PATH.
+
+      Verify the local prerequisites with:
+        tailpreview doctor
+
+      Optional automatic expiry cleanup:
+        tailpreview service install

@@ -1,0 +1,34 @@
+name: Bug report
+description: Report reproducible Tailpreview behavior that is not security-sensitive.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, signed URLs, cookies, or real request data. Report vulnerabilities privately from the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Tailpreview version
+      placeholder: Output of `tailpreview version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [macOS arm64, macOS amd64, Linux arm64, Linux amd64, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the expected behavior and minimal reproduction steps.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include relevant `tailpreview doctor --json` output after removing sensitive values.

@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest a focused improvement that preserves Tailpreview's private security model.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What remote-development problem should Tailpreview solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the desired CLI, configuration, or lifecycle behavior.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Security model
+      options:
+        - label: This proposal does not require Tailscale Funnel or a public Internet listener.
+          required: true
+        - label: This proposal does not require non-loopback upstreams.
+          required: true

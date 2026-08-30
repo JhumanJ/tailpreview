@@ -1,0 +1,30 @@
+{
+  "name": "tailpreview",
+  "version": "0.1.0",
+  "description": "Safely expose already-running localhost services through private Tailscale Serve previews.",
+  "author": {
+    "name": "Julien Nahum",
+    "url": "https://github.com/JhumanJ"
+  },
+  "homepage": "https://github.com/JhumanJ/tailpreview",
+  "repository": "https://github.com/JhumanJ/tailpreview",
+  "license": "MIT",
+  "keywords": ["tailscale", "remote-development", "preview", "localhost"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Tailpreview",
+    "shortDescription": "Private HTTPS previews for local apps.",
+    "longDescription": "Expose an already-running frontend, API, or WebSocket service through a temporary HTTPS URL available only inside your Tailscale tailnet.",
+    "developerName": "Julien Nahum",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "websiteURL": "https://github.com/JhumanJ/tailpreview",
+    "privacyPolicyURL": "https://github.com/JhumanJ/tailpreview/blob/main/PRIVACY.md",
+    "defaultPrompt": [
+      "Expose this already-running project with Tailpreview.",
+      "Create a private preview for this frontend and API.",
+      "Check my active Tailpreview previews."
+    ],
+    "brandColor": "#24292F"
+  }
+}
