@@ -123,6 +123,11 @@ eval "$(/opt/homebrew/bin/brew shellenv)"
 
 Use `/usr/local/bin/brew` instead on Intel macOS.
 
+If Homebrew reports that the Command Line Tools are outdated, install the
+recommended **Command Line Tools for Xcode** update from macOS System Settings
+under **General → Software Update**, then rerun `brew install`. Homebrew checks
+this system prerequisite before installing any formula.
+
 Upgrade or uninstall with:
 
 ```bash
