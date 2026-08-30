@@ -60,7 +60,8 @@ matching exact-port `off` command before retrying. Never substitute Funnel.
 Releases are built by GoReleaser for macOS and Linux on `amd64` and `arm64`.
 The GitHub repository needs a fine-grained `HOMEBREW_TAP_TOKEN` Actions secret
 with Contents read/write access only to `JhumanJ/homebrew-tap`. Tags matching
-`v*` publish GitHub release archives and update the Homebrew cask.
+`v*` publish GitHub release archives and regenerate the Homebrew formula from
+the release checksums.
 
 Validate the release configuration without publishing:
 

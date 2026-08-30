@@ -17,8 +17,8 @@ preview lifecycle.
 2. If the required service is not running, report the missing endpoint. Start
    it only when the user's request also authorizes starting the local stack,
    and use the repository's own lifecycle commands.
-3. Run `tailpreview doctor --json`. If the CLI is missing on macOS, recommend
-   `brew install --cask jhumanj/tap/tailpreview`. Do not replace a failed
+3. Run `tailpreview doctor --json`. If the CLI is missing, recommend
+   `brew install jhumanj/tap/tailpreview`. Do not replace a failed
    dependency or Tailscale consent check with an unsafe workaround.
 4. Run `tailpreview up --json --non-interactive`. Prefer the committed project
    configuration plus worktree-specific `--set` values. Otherwise pass ordered

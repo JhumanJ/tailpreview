@@ -93,10 +93,12 @@ make a preview reachable from the public Internet.
 ### macOS with Homebrew
 
 Homebrew installs Caddy as a dependency and links `tailpreview` into the
-Homebrew `bin` directory automatically:
+Homebrew `bin` directory automatically. Tailpreview is distributed as a
+formula so command-line installation does not require bypassing macOS
+Gatekeeper:
 
 ```bash
-brew install --cask jhumanj/tap/tailpreview
+brew install jhumanj/tap/tailpreview
 tailpreview doctor
 tailpreview service install
 ```
@@ -124,8 +126,8 @@ Use `/usr/local/bin/brew` instead on Intel macOS.
 Upgrade or uninstall with:
 
 ```bash
-brew upgrade --cask tailpreview
-brew uninstall --cask tailpreview
+brew upgrade tailpreview
+brew uninstall tailpreview
 ```
 
 ### Linux and manual installation

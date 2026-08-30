@@ -1,6 +1,6 @@
 {
   "name": "tailpreview",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Safely expose already-running localhost services through private Tailscale Serve previews.",
   "author": {
     "name": "Julien Nahum",
