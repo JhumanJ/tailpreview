@@ -18,8 +18,11 @@ make check
 ```
 
 The default tests never alter real Tailscale state. Tailscale behavior is
-covered by fake adapters and argument assertions. Caddy integration tests use
-temporary paths, random loopback ports, and a private Unix admin socket.
+covered by fake adapters, executable fake `tailscale`/`caddy` binaries, and
+argument assertions. Safe-handoff integration tests exercise final HTTPS
+hostname rejection and compensating rollback without touching the real
+tailnet. Caddy integration tests use temporary paths, random loopback ports,
+and a private Unix admin socket.
 
 ## Package design
 
@@ -47,6 +50,7 @@ For a real opt-in validation:
 python3 -m http.server 3000 --bind 127.0.0.1
 TAILPREVIEW_HOME=/tmp/tailpreview-manual ./bin/tailpreview up \
   http://127.0.0.1:3000 --name manual-test
+TAILPREVIEW_HOME=/tmp/tailpreview-manual ./bin/tailpreview check manual-test
 TAILPREVIEW_HOME=/tmp/tailpreview-manual ./bin/tailpreview down manual-test
 ```
 

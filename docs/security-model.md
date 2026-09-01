@@ -29,6 +29,10 @@ parsing and loopback validation happen before side effects.
 - no Tailscale ACL, grant, tag, key, identity, or device mutation;
 - no global Tailscale Serve reset;
 - no overwrite of an existing, non-Tailpreview Serve port;
+- no successful handoff until every declared public path resolves through the
+  exact Tailpreview HTTPS origin;
+- no redirect handoff to loopback, another origin, or downgraded HTTP;
+- no query strings or fragments in stored verification targets;
 - dedicated Caddy state and a permission-restricted Unix admin socket;
 - no application process, container, worktree, or data lifecycle management;
 - no sensitive HTTP request material in retained logs.
@@ -51,11 +55,40 @@ not share one transaction, Tailpreview uses compensating rollback:
 1. preserve old registry and Caddy state;
 2. apply candidate Caddy state;
 3. configure the exact Tailscale Serve port;
-4. verify the final HTTPS URL;
+4. verify every declared public path through the final HTTPS origin;
 5. persist the new registry;
 6. restore prior Caddy and Serve state if a later step fails.
 
 Tailpreview never calls `tailscale serve reset` during rollback.
+
+## Safe handoff boundary
+
+Local health and final-origin verification answer different questions. A local
+check proves that an already-running process is reachable on loopback. It does
+not prove that the MagicDNS hostname is accepted, Caddy routes the public path,
+or the application keeps navigation and authentication on the preview origin.
+
+Before `up` succeeds, Tailpreview requests every configured `verify` path over
+the exact Tailscale HTTPS origin. Redirects may proceed for at most five hops
+and only when scheme, hostname, and effective port remain identical. A
+terminal redirect, loopback redirect, cross-origin redirect, HTTPS downgrade,
+unexpected status, or timeout aborts the handoff and triggers compensating
+rollback.
+
+`tailpreview check` repeats the local and final checks for a registered
+preview. It also confirms the current MagicDNS hostname, the exact Serve port,
+and that Funnel is not enabled on that port. It does not modify unrelated
+Serve or Funnel configuration.
+
+Tailpreview reports only the rejected origin for unsafe redirects. Paths,
+queries, fragments, credentials, cookies, headers, bodies, and client IPs are
+excluded from stored reports and structured errors.
+
+Application-specific origin configuration stays outside Tailpreview. For
+example, a Vite hostname allowlist, OAuth callback, or WebAuthn relying-party
+origin must be set by the application's own ignored runtime configuration.
+Tailpreview diagnoses the mismatch and gives bounded remediation; it never
+rewrites application startup settings or broadens a hostname allowlist.
 
 ## Known limitation: cookies across ports
 

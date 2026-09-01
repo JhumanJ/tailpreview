@@ -44,26 +44,46 @@ type HealthCheck struct {
 	InsecureSkipVerify bool   `json:"insecure_skip_verify,omitempty" yaml:"insecure_skip_verify,omitempty"`
 }
 
+type VerificationCheck struct {
+	Path    string `json:"path" yaml:"path"`
+	MinCode int    `json:"min_code" yaml:"min_code"`
+	MaxCode int    `json:"max_code" yaml:"max_code"`
+}
+
+type VerificationResult struct {
+	Path        string `json:"path"`
+	StatusCode  int    `json:"status_code"`
+	FinalOrigin string `json:"final_origin"`
+}
+
+type VerificationReport struct {
+	VerifiedAt time.Time            `json:"verified_at"`
+	Checks     []VerificationResult `json:"checks"`
+}
+
 type Preview struct {
-	ID              string        `json:"id"`
-	Name            string        `json:"name"`
-	ProjectRoot     string        `json:"project_root"`
-	ConfigPath      string        `json:"config_path,omitempty"`
-	ExternalPort    int           `json:"external_port"`
-	GatewayPort     int           `json:"gateway_port"`
-	URL             string        `json:"url"`
-	Routes          []Route       `json:"routes"`
-	Health          []HealthCheck `json:"health,omitempty"`
-	CreatedAt       time.Time     `json:"created_at"`
-	UpdatedAt       time.Time     `json:"updated_at"`
-	LastUsedAt      time.Time     `json:"last_used_at"`
-	IdleTTL         Duration      `json:"idle_ttl"`
-	MaxAge          Duration      `json:"max_age"`
-	Pinned          bool          `json:"pinned"`
-	Status          string        `json:"status"`
-	UnhealthySince  *time.Time    `json:"unhealthy_since,omitempty"`
-	CookieWarning   bool          `json:"cookie_warning,omitempty"`
-	LastHealthError string        `json:"last_health_error,omitempty"`
+	ID              string              `json:"id"`
+	Name            string              `json:"name"`
+	ProjectRoot     string              `json:"project_root"`
+	ConfigPath      string              `json:"config_path,omitempty"`
+	ExternalPort    int                 `json:"external_port"`
+	GatewayPort     int                 `json:"gateway_port"`
+	URL             string              `json:"url"`
+	HandoffURL      string              `json:"handoff_url"`
+	Routes          []Route             `json:"routes"`
+	Health          []HealthCheck       `json:"health,omitempty"`
+	Verify          []VerificationCheck `json:"verify,omitempty"`
+	CreatedAt       time.Time           `json:"created_at"`
+	UpdatedAt       time.Time           `json:"updated_at"`
+	LastUsedAt      time.Time           `json:"last_used_at"`
+	IdleTTL         Duration            `json:"idle_ttl"`
+	MaxAge          Duration            `json:"max_age"`
+	Pinned          bool                `json:"pinned"`
+	Status          string              `json:"status"`
+	UnhealthySince  *time.Time          `json:"unhealthy_since,omitempty"`
+	CookieWarning   bool                `json:"cookie_warning,omitempty"`
+	LastHealthError string              `json:"last_health_error,omitempty"`
+	LastVerifiedAt  *time.Time          `json:"last_verified_at,omitempty"`
 }
 
 type PortReservation struct {

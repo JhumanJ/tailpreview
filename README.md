@@ -74,6 +74,8 @@ Tailpreview provides:
 - pinning for previews that must not expire;
 - atomic state, Caddy rollback, and safe concurrent agent calls;
 - strict localhost-only upstream validation;
+- explicit final-origin checks with same-origin redirect enforcement;
+- a dedicated `handoff_url` and `check` command for safe agent handoffs;
 - stable JSON output and non-interactive commands;
 - minimal privacy-filtered access logs for TTL/LRU tracking.
 
@@ -163,10 +165,11 @@ Start the app first, then expose it:
 tailpreview up http://127.0.0.1:3000
 ```
 
-Tailpreview returns a URL similar to:
+Tailpreview verifies the final HTTPS origin, then returns a handoff URL similar
+to:
 
 ```text
-Preview ready: https://dev-mini.example.ts.net:8443
+Handoff URL: https://dev-mini.example.ts.net:8443
 ```
 
 Flags may appear before or after the positional upstream:
@@ -206,6 +209,13 @@ routes:
 health:
   - ${API_URL}/health
 
+verify:
+  - /
+  - path: /api/health/ready
+    min_code: 200
+    max_code: 299
+    follow_redirects: same_origin
+
 ttl:
   idle: 24h
   max_age: 168h
@@ -236,6 +246,7 @@ See [configuration reference](docs/configuration.md).
 ```bash
 tailpreview list
 tailpreview status opnform-pr-1281
+tailpreview check opnform-pr-1281
 tailpreview logs opnform-pr-1281
 tailpreview pin opnform-pr-1281
 tailpreview unpin opnform-pr-1281
@@ -258,12 +269,15 @@ All lifecycle commands support stable JSON:
 
 ```bash
 tailpreview up http://127.0.0.1:3000 --json --non-interactive
+tailpreview check landing-redesign --json --non-interactive
 tailpreview list --json
 tailpreview doctor --json
 ```
 
-The JSON includes `schema_version`, preview ID, URL, local routes, status,
-timestamps, TTL, and eviction details. See the
+The JSON includes `schema_version`, preview ID, `handoff_url`, declared public
+verification paths, local routes, status, timestamps, TTL, and eviction
+details. Agents must communicate `handoff_url`, never an upstream localhost
+URL. See the
 [agent contract](docs/agent-contract.md) for command semantics and exit codes.
 
 ### Install the Tailpreview skill in Codex
@@ -320,6 +334,10 @@ Tailpreview's v1 boundaries are deliberately narrow:
 - Tailscale Serve is the only exposure mechanism;
 - Funnel commands do not exist in the codebase;
 - existing Serve ports are detected and never overwritten;
+- a handoff succeeds only after every declared public path stays within the
+  same HTTPS origin and ends on a non-redirect status in its configured range;
+- redirects to localhost, another origin, or non-HTTPS are rejected without
+  persisting their path or query string;
 - `tailscale serve reset` is never used;
 - the Caddy admin API uses a private Unix socket;
 - the dedicated Caddy instance does not touch an existing Caddy service;

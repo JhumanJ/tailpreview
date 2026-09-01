@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -37,7 +36,7 @@ type Health interface {
 }
 
 type Verifier interface {
-	Verify(ctx context.Context, rawURL string) error
+	Verify(ctx context.Context, rawURL string, checks []model.VerificationCheck) (model.VerificationReport, error)
 }
 
 type Service struct {
@@ -76,7 +75,17 @@ type ActionResult struct {
 	Removed       []model.Preview `json:"removed,omitempty"`
 }
 
+type CheckResult struct {
+	SchemaVersion int                      `json:"schema_version"`
+	Action        string                   `json:"action"`
+	Preview       model.Preview            `json:"preview"`
+	Verification  model.VerificationReport `json:"verification"`
+}
+
 func (s *Service) Up(ctx context.Context, request UpRequest) (UpResult, error) {
+	if s.Verifier == nil {
+		return UpResult{}, errors.New("final preview verifier is not configured")
+	}
 	if len(request.Config.Health) == 0 {
 		request.Config.Health = defaultHealthChecks(request.Config.Routes)
 	}
@@ -148,8 +157,10 @@ func (s *Service) Up(ctx context.Context, request UpRequest) (UpResult, error) {
 		ExternalPort: port,
 		GatewayPort:  gateway,
 		URL:          fmt.Sprintf("https://%s:%d", status.Self.DNSName, port),
+		HandoffURL:   fmt.Sprintf("https://%s:%d", status.Self.DNSName, port),
 		Routes:       request.Config.Routes,
 		Health:       request.Config.Health,
+		Verify:       request.Config.Verify,
 		CreatedAt:    created,
 		UpdatedAt:    now,
 		LastUsedAt:   now,
@@ -176,18 +187,21 @@ func (s *Service) Up(ctx context.Context, request UpRequest) (UpResult, error) {
 		}
 		return UpResult{}, err
 	}
-	if s.Verifier != nil {
-		if err := s.Verifier.Verify(ctx, preview.URL); err != nil {
-			_ = s.Tailscale.Remove(ctx, port)
-			_ = s.Caddy.Apply(ctx, oldPreviews)
-			if existing != nil {
-				_ = s.Tailscale.Expose(ctx, existing.ExternalPort, existing.GatewayPort)
-			} else if evicted != nil {
-				_ = s.Tailscale.Expose(ctx, evicted.ExternalPort, evicted.GatewayPort)
-			}
-			return UpResult{}, fmt.Errorf("verify final preview URL: %w", err)
+	report, verifyErr := s.Verifier.Verify(ctx, preview.URL, preview.Verify)
+	if verifyErr != nil {
+		_ = s.Tailscale.Remove(ctx, port)
+		_ = s.Caddy.Apply(ctx, oldPreviews)
+		if existing != nil {
+			_ = s.Tailscale.Expose(ctx, existing.ExternalPort, existing.GatewayPort)
+		} else if evicted != nil {
+			_ = s.Tailscale.Expose(ctx, evicted.ExternalPort, evicted.GatewayPort)
 		}
+		return UpResult{}, fmt.Errorf("verify final preview URL: %w", verifyErr)
 	}
+	preview.LastVerifiedAt = &report.VerifiedAt
+	desired = withoutID(desired, preview.ID)
+	desired = append(desired, preview)
+	sortPreviews(desired)
 	if evicted != nil && evicted.ExternalPort != port {
 		if err := s.Tailscale.Remove(ctx, evicted.ExternalPort); err != nil {
 			_ = s.Tailscale.Remove(ctx, port)
@@ -216,6 +230,90 @@ func (s *Service) Up(ctx context.Context, request UpRequest) (UpResult, error) {
 		warnings = append(warnings, "multiple previews from this project share one hostname; if authentication sessions collide, configure unique cookie names per worktree")
 	}
 	return UpResult{SchemaVersion: 1, Action: "up", Preview: preview, Evicted: evicted, Warnings: warnings}, nil
+}
+
+func (s *Service) Check(ctx context.Context, selector string) (CheckResult, error) {
+	locked, registry, err := s.lockRegistry()
+	if err != nil {
+		return CheckResult{}, err
+	}
+	defer locked.Close()
+	index := findPreview(registry.Previews, selector)
+	if index < 0 {
+		return CheckResult{}, fmt.Errorf("preview %q not found", selector)
+	}
+	preview := registry.Previews[index]
+	normalizePreview(&preview)
+	if err := s.Health.CheckOnce(ctx, preview.Health); err != nil {
+		return CheckResult{}, &SafeHandoffError{
+			Code:        "local_health_failed",
+			Phase:       "local_health",
+			Message:     "local upstream health checks failed",
+			Hostname:    hostnameOnly(preview.URL),
+			Remediation: "Restore the already-running loopback service, then run tailpreview check again.",
+		}
+	}
+	status, err := s.Tailscale.Status(ctx)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	if status.BackendState != "Running" || status.Self.DNSName == "" {
+		return CheckResult{}, &SafeHandoffError{
+			Code:        "tailscale_unavailable",
+			Phase:       "tailscale_status",
+			Message:     "Tailscale is not running with a MagicDNS hostname",
+			Hostname:    hostnameOnly(preview.HandoffURL),
+			Remediation: "Restore Tailscale connectivity, then run tailpreview check again.",
+		}
+	}
+	if !strings.EqualFold(strings.TrimSuffix(status.Self.DNSName, "."), hostnameOnly(preview.HandoffURL)) {
+		return CheckResult{}, &SafeHandoffError{
+			Code:        "tailnet_hostname_changed",
+			Phase:       "tailscale_status",
+			Message:     "the registered preview hostname no longer matches this Tailscale device",
+			Hostname:    hostnameOnly(preview.HandoffURL),
+			Remediation: "Run tailpreview down for the stale preview, then create it again with tailpreview up.",
+		}
+	}
+	available, err := s.Tailscale.PortAvailable(ctx, preview.ExternalPort)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	if available {
+		return CheckResult{}, &SafeHandoffError{
+			Code:        "serve_listener_missing",
+			Phase:       "tailscale_status",
+			Message:     "the registered Tailpreview HTTPS listener is missing from Tailscale Serve",
+			Hostname:    hostnameOnly(preview.HandoffURL),
+			Remediation: "Run tailpreview up again to restore only this preview port.",
+		}
+	}
+	if enabled, funnelErr := s.Tailscale.FunnelEnabledOnPort(ctx, preview.ExternalPort); funnelErr != nil {
+		return CheckResult{}, funnelErr
+	} else if enabled {
+		return CheckResult{}, &SafeHandoffError{
+			Code:        "public_endpoint_detected",
+			Phase:       "tailscale_status",
+			Message:     "Tailscale Funnel is enabled on the registered Tailpreview port",
+			Hostname:    hostnameOnly(preview.HandoffURL),
+			Remediation: "Disable Funnel only on this port before restoring the preview with tailpreview up.",
+		}
+	}
+	if s.Verifier == nil {
+		return CheckResult{}, errors.New("final preview verifier is not configured")
+	}
+	report, err := s.Verifier.Verify(ctx, preview.HandoffURL, preview.Verify)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	preview.LastVerifiedAt = &report.VerifiedAt
+	preview.Status = "active"
+	preview.LastHealthError = ""
+	registry.Previews[index] = preview
+	if err := locked.Save(registry); err != nil {
+		return CheckResult{}, err
+	}
+	return CheckResult{SchemaVersion: 1, Action: "check", Preview: preview, Verification: report}, nil
 }
 
 func (s *Service) Down(ctx context.Context, selector string) (ActionResult, error) {
@@ -256,6 +354,9 @@ func (s *Service) List() ([]model.Preview, error) {
 	}
 	defer locked.Close()
 	s.refreshUsage(&registry, s.now())
+	for i := range registry.Previews {
+		normalizePreview(&registry.Previews[i])
+	}
 	if err := locked.Save(registry); err != nil {
 		return nil, err
 	}
@@ -600,44 +701,6 @@ func previewHasActiveRequests(preview model.Preview, active map[string]int) bool
 	return false
 }
 
-type HTTPVerifier struct {
-	Timeout time.Duration
-}
-
-func (v HTTPVerifier) Verify(ctx context.Context, rawURL string) error {
-	timeout := v.Timeout
-	if timeout == 0 {
-		timeout = 10 * time.Second
-	}
-	client := &http.Client{
-		Timeout: 3 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	deadline := time.Now().Add(timeout)
-	var last error
-	for time.Now().Before(deadline) {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-		resp, err := client.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode <= 399 {
-				return nil
-			}
-			last = fmt.Errorf("status %d", resp.StatusCode)
-		} else {
-			last = err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(250 * time.Millisecond):
-		}
-	}
-	return last
-}
-
 func defaultHealthChecks(routes []model.Route) []model.HealthCheck {
 	seen := map[string]bool{}
 	checks := make([]model.HealthCheck, 0, len(routes))
@@ -655,6 +718,18 @@ func defaultHealthChecks(routes []model.Route) []model.HealthCheck {
 		})
 	}
 	return checks
+}
+
+func normalizePreview(preview *model.Preview) {
+	if preview.HandoffURL == "" {
+		preview.HandoffURL = preview.URL
+	}
+	if len(preview.Verify) == 0 {
+		preview.Verify = []model.VerificationCheck{{Path: "/", MinCode: 200, MaxCode: 399}}
+	}
+	if len(preview.Health) == 0 {
+		preview.Health = defaultHealthChecks(preview.Routes)
+	}
 }
 
 func LocalPortFree(port int) bool {
