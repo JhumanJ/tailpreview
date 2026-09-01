@@ -59,6 +59,21 @@ func TestContainsEnabledFunnel(t *testing.T) {
 	}
 }
 
+func TestContainsEnabledFunnelPortIsExact(t *testing.T) {
+	payload := map[string]interface{}{
+		"AllowFunnel": map[string]interface{}{
+			"machine.example.ts.net:8443": true,
+			"machine.example.ts.net:8444": false,
+		},
+	}
+	if !containsEnabledFunnelPort(payload, 8443, false) {
+		t.Fatal("expected Funnel on port 8443")
+	}
+	if containsEnabledFunnelPort(payload, 8444, false) || containsEnabledFunnelPort(payload, 8445, false) {
+		t.Fatal("unrelated or disabled ports must not be reported as Funnel")
+	}
+}
+
 func TestExposeUsesOnlyPrivateServeCommand(t *testing.T) {
 	runner := &recordingRunner{results: []process.Result{{Stdout: "Available within your tailnet"}}}
 	client := CLI{Binary: "/opt/tailscale", Runner: runner}

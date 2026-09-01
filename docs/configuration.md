@@ -26,6 +26,13 @@ health:
     max_code: 399
     insecure_skip_verify: false
 
+verify:
+  - /
+  - path: /api/health/ready
+    min_code: 200
+    max_code: 299
+    follow_redirects: same_origin
+
 ttl:
   idle: 24h
   max_age: 168h
@@ -74,6 +81,44 @@ Tailpreview waits up to 30 seconds before failing. `--skip-health` is available
 for deliberate troubleshooting, but final tailnet URL verification still
 runs.
 
+## Final-origin verification
+
+`verify` declares public paths that must work through the final Tailpreview
+HTTPS origin before `up` can succeed. It is separate from `health`: local
+health proves that an upstream process is listening, while final-origin
+verification catches proxy, hostname, HTTPS, and application-origin mistakes.
+
+When omitted, Tailpreview verifies `/` with a `200–399` configured range. A
+scalar uses the same defaults:
+
+```yaml
+verify:
+  - /
+```
+
+Mapping form accepts `path`, `min_code`, `max_code`, and
+`follow_redirects`. The only supported redirect policy is `same_origin`, which
+is also the default. Redirects are followed up to five hops only when scheme,
+hostname, and effective port remain identical. The terminal response must be a
+non-redirect status inside the configured range. Redirects to loopback,
+another origin, or non-HTTPS are rejected.
+
+Verification paths must begin with exactly one `/` and cannot contain a query
+string or fragment. This keeps credentials, signed values, and other sensitive
+request data out of persistent state and error output.
+
+CLI verification flags replace the YAML verification list when supplied:
+
+```bash
+tailpreview up \
+  --verify / \
+  --verify '/api/health/ready=200-299' \
+  http://127.0.0.1:3000
+```
+
+`--skip-health` skips only local health checks. Final-origin verification is a
+required handoff boundary and cannot be disabled.
+
 ## Variables and overrides
 
 `${NAME}` placeholders use `--set NAME=value` first, then the current process
@@ -102,7 +147,9 @@ tailpreview up \
   --health https://127.0.0.1:3001/health \
   --health-range 'https://127.0.0.1:3001/health=200-499' \
   --insecure-health https://127.0.0.1:3001/health \
-  --optional-health http://127.0.0.1:3000/ready
+  --optional-health http://127.0.0.1:3000/ready \
+  --verify / \
+  --verify '/api/health/ready=200-299'
 ```
 
 `--insecure-upstream` selects a configured route by path.

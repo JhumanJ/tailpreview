@@ -22,6 +22,12 @@ routes:
     upstream: ${FRONTEND_URL}
 health:
   - ${API_URL}/health
+verify:
+  - path: /
+    follow_redirects: same_origin
+  - path: /api/health
+    min_code: 200
+    max_code: 299
 ttl:
   idle: 2h
   max_age: 48h
@@ -44,6 +50,41 @@ ttl:
 	}
 	if !resolved.Health[0].Required || resolved.Health[0].MinCode != 200 || resolved.Health[0].MaxCode != 399 {
 		t.Fatalf("unexpected health defaults: %#v", resolved.Health[0])
+	}
+	if len(resolved.Verify) != 2 || resolved.Verify[0].Path != "/" || resolved.Verify[1].MaxCode != 299 {
+		t.Fatalf("unexpected verification checks: %#v", resolved.Verify)
+	}
+}
+
+func TestValidateVerificationPathsRejectsSensitiveOrUnsafeValues(t *testing.T) {
+	for _, raw := range []string{"", "relative", "//other.example/path", "/login?token=secret", "/page#fragment"} {
+		if err := ValidateVerificationPath(raw); err == nil {
+			t.Fatalf("expected verification path %q to fail", raw)
+		}
+	}
+	if err := ValidateVerificationPath("/api/health/ready"); err != nil {
+		t.Fatalf("expected safe path to pass: %v", err)
+	}
+}
+
+func TestLoadRejectsVerificationStatusOutsideSafeHandoffRange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, FileName)
+	content := `version: 1
+routes:
+  - path: /*
+    upstream: http://127.0.0.1:3000
+verify:
+  - path: /
+    min_code: 200
+    max_code: 499
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path, dir, nil)
+	if err == nil || !strings.Contains(err.Error(), "200 <= MIN <= MAX <= 399") {
+		t.Fatalf("expected unsafe verification range to fail, got %v", err)
 	}
 }
 

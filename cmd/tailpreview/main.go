@@ -73,7 +73,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	if err := command.execute(ctx, args); err != nil {
 		jsonMode := containsArg(args, "--json")
 		if jsonMode {
-			_ = json.NewEncoder(errOut).Encode(map[string]interface{}{"schema_version": 1, "error": err.Error()})
+			_ = json.NewEncoder(errOut).Encode(app.ErrorPayloadFor(err))
 		} else {
 			fmt.Fprintln(errOut, "error:", err)
 		}
@@ -95,6 +95,8 @@ func (c *cli) execute(ctx context.Context, args []string) error {
 		return c.list(args[1:])
 	case "status":
 		return c.status(args[1:])
+	case "check":
+		return c.check(ctx, args[1:])
 	case "pin":
 		return c.pin(args[1:], true)
 	case "unpin":
@@ -127,7 +129,7 @@ func (c *cli) execute(ctx context.Context, args []string) error {
 func (c *cli) up(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	fs.SetOutput(c.errOut)
-	var routes, sets, healthChecks, optionalHealthChecks, healthRanges stringList
+	var routes, sets, healthChecks, optionalHealthChecks, healthRanges, verificationChecks stringList
 	var stripPrefixes, insecureRoutes, insecureHealthChecks stringList
 	name := fs.String("name", "", "preview name")
 	configPath := fs.String("config", "", "explicit config file")
@@ -146,6 +148,7 @@ func (c *cli) up(ctx context.Context, args []string) error {
 	fs.Var(&stripPrefixes, "strip-prefix", "route path whose prefix should be stripped")
 	fs.Var(&insecureRoutes, "insecure-upstream", "route path allowed to use an unverified loopback TLS certificate")
 	fs.Var(&insecureHealthChecks, "insecure-health", "health URL allowed to use an unverified loopback TLS certificate")
+	fs.Var(&verificationChecks, "verify", "public path or PATH=MIN-MAX to verify through the final HTTPS origin (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -228,6 +231,16 @@ func (c *cli) up(ctx context.Context, args []string) error {
 		}
 		check.InsecureSkipVerify = true
 	}
+	if len(verificationChecks) > 0 {
+		resolved.Verify = nil
+		for _, raw := range verificationChecks {
+			check, parseErr := parseVerificationCheck(raw)
+			if parseErr != nil {
+				return parseErr
+			}
+			resolved.Verify = append(resolved.Verify, check)
+		}
+	}
 	if *ttl != "" {
 		resolved.IdleTTL, err = config.ParseDuration(*ttl)
 		if err != nil {
@@ -248,12 +261,34 @@ func (c *cli) up(ctx context.Context, args []string) error {
 		return err
 	}
 	return c.writeJSONOrHuman(result, *jsonMode, func() {
-		fmt.Fprintf(c.out, "Preview ready: %s\n", result.Preview.URL)
+		fmt.Fprintf(c.out, "Handoff URL: %s\n", result.Preview.HandoffURL)
 		if result.Evicted != nil {
 			fmt.Fprintf(c.out, "Evicted: %s\n", result.Evicted.Name)
 		}
 		for _, warning := range result.Warnings {
 			fmt.Fprintf(c.out, "Warning: %s\n", warning)
+		}
+	})
+}
+
+func (c *cli) check(ctx context.Context, args []string) error {
+	fs, jsonMode := basicFlagSet("check", c.errOut)
+	_ = fs.Bool("non-interactive", false, "never prompt")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	selector, err := selectorFromArgs(fs.Args())
+	if err != nil {
+		return err
+	}
+	result, err := c.service.Check(ctx, selector)
+	if err != nil {
+		return err
+	}
+	return c.writeJSONOrHuman(result, *jsonMode, func() {
+		fmt.Fprintf(c.out, "Verified handoff URL: %s\n", result.Preview.HandoffURL)
+		for _, check := range result.Verification.Checks {
+			fmt.Fprintf(c.out, "  %s -> HTTP %d\n", check.Path, check.StatusCode)
 		}
 	})
 }
@@ -293,7 +328,7 @@ func (c *cli) list(args []string) error {
 			if preview.Pinned {
 				pin = " [pinned]"
 			}
-			fmt.Fprintf(c.out, "%-28s %s %s%s\n", preview.Name, preview.Status, preview.URL, pin)
+			fmt.Fprintf(c.out, "%-28s %s %s%s\n", preview.Name, preview.Status, preview.HandoffURL, pin)
 		}
 	})
 }
@@ -313,7 +348,7 @@ func (c *cli) status(args []string) error {
 	}
 	for _, preview := range previews {
 		if preview.ID == selector || preview.Name == selector || preview.ProjectRoot == selector {
-			return c.writeJSONOrHuman(preview, *jsonMode, func() { fmt.Fprintf(c.out, "%s\n%s\nstatus: %s\n", preview.Name, preview.URL, preview.Status) })
+			return c.writeJSONOrHuman(preview, *jsonMode, func() { fmt.Fprintf(c.out, "%s\n%s\nstatus: %s\n", preview.Name, preview.HandoffURL, preview.Status) })
 		}
 	}
 	return fmt.Errorf("preview %q not found", selector)
@@ -528,6 +563,29 @@ func parseHealthRange(value string) (string, int, int, error) {
 	return value[:separator], minCode, maxCode, nil
 }
 
+func parseVerificationCheck(value string) (model.VerificationCheck, error) {
+	check := model.VerificationCheck{Path: value, MinCode: 200, MaxCode: 399}
+	if separator := strings.LastIndex(value, "="); separator > 0 && separator < len(value)-1 {
+		rangeParts := strings.SplitN(value[separator+1:], "-", 2)
+		if len(rangeParts) == 2 {
+			minCode, minErr := strconv.Atoi(rangeParts[0])
+			maxCode, maxErr := strconv.Atoi(rangeParts[1])
+			if minErr == nil && maxErr == nil {
+				check.Path = value[:separator]
+				check.MinCode = minCode
+				check.MaxCode = maxCode
+			}
+		}
+	}
+	if err := config.ValidateVerificationPath(check.Path); err != nil {
+		return model.VerificationCheck{}, fmt.Errorf("--verify: %w", err)
+	}
+	if check.MinCode < 200 || check.MaxCode > 399 || check.MinCode > check.MaxCode {
+		return model.VerificationCheck{}, errors.New("--verify status range must satisfy 200 <= MIN <= MAX <= 399")
+	}
+	return check, nil
+}
+
 func findHealth(checks []model.HealthCheck, url string) *model.HealthCheck {
 	for i := range checks {
 		if checks[i].URL == url {
@@ -545,6 +603,7 @@ Usage:
   tailpreview down [name]
   tailpreview list
   tailpreview status [name]
+  tailpreview check [name]
   tailpreview logs [name]
   tailpreview pin|unpin [name]
   tailpreview gc

@@ -30,6 +30,7 @@ type Client interface {
 	Status(ctx context.Context) (Status, error)
 	PortAvailable(ctx context.Context, port int) (bool, error)
 	FunnelEnabled(ctx context.Context) (bool, error)
+	FunnelEnabledOnPort(ctx context.Context, port int) (bool, error)
 	Expose(ctx context.Context, externalPort, gatewayPort int) error
 	Remove(ctx context.Context, externalPort int) error
 }
@@ -66,6 +67,14 @@ func (c CLI) FunnelEnabled(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return containsEnabledFunnel(payload), nil
+}
+
+func (c CLI) FunnelEnabledOnPort(ctx context.Context, port int) (bool, error) {
+	payload, err := c.serveStatus(ctx)
+	if err != nil {
+		return false, err
+	}
+	return containsEnabledFunnelPort(payload, port, false), nil
 }
 
 func (c CLI) Expose(ctx context.Context, externalPort, gatewayPort int) error {
@@ -168,6 +177,32 @@ func containsEnabledFunnel(value interface{}) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+func containsEnabledFunnelPort(value interface{}, port int, insideFunnel bool) bool {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, child := range typed {
+			nextInside := insideFunnel || strings.Contains(strings.ToLower(key), "funnel")
+			if nextInside && (key == strconv.Itoa(port) || stringContainsPort(key, port)) && truthy(child) {
+				return true
+			}
+			if containsEnabledFunnelPort(child, port, nextInside) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, child := range typed {
+			if containsEnabledFunnelPort(child, port, insideFunnel) {
+				return true
+			}
+		}
+	case string:
+		return insideFunnel && (typed == strconv.Itoa(port) || stringContainsPort(typed, port))
+	case float64:
+		return insideFunnel && int(typed) == port
 	}
 	return false
 }

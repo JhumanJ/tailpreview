@@ -22,11 +22,12 @@ const FileName = ".tailpreview.yml"
 var variablePattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 type File struct {
-	Version int           `yaml:"version"`
-	Name    string        `yaml:"name,omitempty"`
-	Routes  []model.Route `yaml:"routes"`
-	Health  []HealthCheck `yaml:"health,omitempty"`
-	TTL     TTL           `yaml:"ttl,omitempty"`
+	Version int                 `yaml:"version"`
+	Name    string              `yaml:"name,omitempty"`
+	Routes  []model.Route       `yaml:"routes"`
+	Health  []HealthCheck       `yaml:"health,omitempty"`
+	Verify  []VerificationCheck `yaml:"verify,omitempty"`
+	TTL     TTL                 `yaml:"ttl,omitempty"`
 }
 
 type TTL struct {
@@ -40,6 +41,7 @@ type Resolved struct {
 	Name        string
 	Routes      []model.Route
 	Health      []model.HealthCheck
+	Verify      []model.VerificationCheck
 	IdleTTL     time.Duration
 	MaxAge      time.Duration
 }
@@ -47,7 +49,11 @@ type Resolved struct {
 type Values map[string]string
 
 func Defaults() Resolved {
-	return Resolved{IdleTTL: 24 * time.Hour, MaxAge: 7 * 24 * time.Hour}
+	return Resolved{
+		IdleTTL: 24 * time.Hour,
+		MaxAge:  7 * 24 * time.Hour,
+		Verify:  []model.VerificationCheck{{Path: "/", MinCode: 200, MaxCode: 399}},
+	}
 }
 
 func Discover(start string) (configPath, projectRoot string, err error) {
@@ -106,6 +112,12 @@ func Load(path, projectRoot string, values Values) (Resolved, error) {
 	for _, check := range cfg.Health {
 		resolved.Health = append(resolved.Health, check.HealthCheck)
 	}
+	if len(cfg.Verify) > 0 {
+		resolved.Verify = make([]model.VerificationCheck, 0, len(cfg.Verify))
+		for _, check := range cfg.Verify {
+			resolved.Verify = append(resolved.Verify, check.VerificationCheck)
+		}
+	}
 	if cfg.TTL.Idle.Duration > 0 {
 		resolved.IdleTTL = cfg.TTL.Idle.Duration
 	}
@@ -150,6 +162,36 @@ func Validate(cfg Resolved) error {
 		if check.MinCode < 100 || check.MaxCode > 599 || check.MinCode > check.MaxCode {
 			return fmt.Errorf("health check %d has invalid status range", i+1)
 		}
+	}
+	if len(cfg.Verify) == 0 {
+		return errors.New("at least one final verification path is required")
+	}
+	seenVerifyPaths := make(map[string]bool, len(cfg.Verify))
+	for i, check := range cfg.Verify {
+		if err := ValidateVerificationPath(check.Path); err != nil {
+			return fmt.Errorf("verification check %d: %w", i+1, err)
+		}
+		if check.MinCode < 200 || check.MaxCode > 399 || check.MinCode > check.MaxCode {
+			return fmt.Errorf("verification check %d status range must satisfy 200 <= MIN <= MAX <= 399", i+1)
+		}
+		if seenVerifyPaths[check.Path] {
+			return fmt.Errorf("verification path %q is duplicated", check.Path)
+		}
+		seenVerifyPaths[check.Path] = true
+	}
+	return nil
+}
+
+func ValidateVerificationPath(raw string) error {
+	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+		return errors.New("path must start with exactly one /")
+	}
+	if strings.ContainsAny(raw, "?#") {
+		return errors.New("query strings and fragments are forbidden in verification paths")
+	}
+	u, err := url.ParseRequestURI(raw)
+	if err != nil || u.IsAbs() || u.Host != "" {
+		return fmt.Errorf("invalid public path %q", raw)
 	}
 	return nil
 }

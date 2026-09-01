@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,30 +20,136 @@ import (
 	"github.com/jhumanj/tailpreview/internal/tailscale"
 )
 
-func TestHTTPVerifierAcceptsSuccessAndRedirect(t *testing.T) {
-	for _, code := range []int{http.StatusOK, http.StatusTemporaryRedirect} {
-		t.Run(http.StatusText(code), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(code)
-			}))
-			defer server.Close()
+func TestHTTPVerifierAcceptsSuccessAndSameOriginRedirect(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/ready", http.StatusPermanentRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	origin, transport := publicTLSTestOrigin(t, server, "preview.example.ts.net")
 
-			if err := (HTTPVerifier{Timeout: time.Second}).Verify(context.Background(), server.URL); err != nil {
-				t.Fatalf("expected status %d to pass final verification: %v", code, err)
-			}
-		})
+	report, err := (HTTPVerifier{Timeout: time.Second, Transport: transport}).Verify(
+		context.Background(), origin, []model.VerificationCheck{{Path: "/", MinCode: 200, MaxCode: 299}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Checks) != 1 || report.Checks[0].StatusCode != http.StatusNoContent || report.Checks[0].FinalOrigin != origin {
+		t.Fatalf("unexpected verification report: %#v", report)
 	}
 }
 
-func TestHTTPVerifierRejectsClientErrors(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+func TestHTTPVerifierRejectsForbiddenImmediately(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer server.Close()
+	origin, transport := publicTLSTestOrigin(t, server, "preview.example.ts.net")
 
-	err := (HTTPVerifier{Timeout: 50 * time.Millisecond}).Verify(context.Background(), server.URL)
-	if err == nil || !strings.Contains(err.Error(), "status 403") {
-		t.Fatalf("expected final verification to reject 403, got %v", err)
+	started := time.Now()
+	_, err := (HTTPVerifier{Timeout: time.Second, Transport: transport}).Verify(
+		context.Background(), origin, []model.VerificationCheck{{Path: "/", MinCode: 200, MaxCode: 399}},
+	)
+	var safe *SafeHandoffError
+	if !errors.As(err, &safe) || safe.Code != "external_forbidden" || safe.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected structured 403 rejection, got %v", err)
+	}
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("403 should fail immediately, took %s", time.Since(started))
+	}
+}
+
+func TestHTTPVerifierRejectsLoopbackRedirectWithoutLeakingQuery(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://localhost:3867/login?token=must-not-leak", http.StatusPermanentRedirect)
+	}))
+	defer server.Close()
+	origin, transport := publicTLSTestOrigin(t, server, "preview.example.ts.net")
+
+	_, err := (HTTPVerifier{Timeout: time.Second, Transport: transport}).Verify(
+		context.Background(), origin, []model.VerificationCheck{{Path: "/", MinCode: 200, MaxCode: 399}},
+	)
+	var safe *SafeHandoffError
+	if !errors.As(err, &safe) || safe.Code != "loopback_redirect" || safe.RedirectOrigin != "http://localhost:3867" {
+		t.Fatalf("expected sanitized loopback redirect, got %#v / %v", safe, err)
+	}
+	payload := ErrorPayloadFor(err)
+	if strings.Contains(payload.Error+payload.RedirectOrigin+payload.Remediation, "must-not-leak") {
+		t.Fatalf("structured error leaked redirect query: %#v", payload)
+	}
+}
+
+func TestHTTPVerifierRejectsCredentialedOriginsAndRedirects(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := strings.Replace(serverURLWithoutCredentials(r), "https://", "https://user:secret@", 1) + "/ready"
+		http.Redirect(w, r, target, http.StatusFound)
+	}))
+	defer server.Close()
+	origin, transport := publicTLSTestOrigin(t, server, "preview.example.ts.net")
+
+	verifier := HTTPVerifier{Timeout: time.Second, Transport: transport}
+	_, err := verifier.Verify(context.Background(), origin, []model.VerificationCheck{{Path: "/", MinCode: 200, MaxCode: 399}})
+	var safe *SafeHandoffError
+	if !errors.As(err, &safe) || safe.Code != "credentialed_redirect" || strings.Contains(safe.RedirectOrigin, "secret") {
+		t.Fatalf("expected sanitized credentialed redirect rejection, got %#v / %v", safe, err)
+	}
+
+	credentialed := strings.Replace(origin, "https://", "https://user:secret@", 1)
+	_, err = verifier.Verify(context.Background(), credentialed, []model.VerificationCheck{{Path: "/", MinCode: 200, MaxCode: 399}})
+	if !errors.As(err, &safe) || safe.Code != "invalid_handoff_url" || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("expected credentialed base origin rejection without leakage, got %#v / %v", safe, err)
+	}
+}
+
+func TestHTTPVerifierRejectsLoopbackHandoffOrigin(t *testing.T) {
+	_, err := (HTTPVerifier{}).Verify(context.Background(), "https://localhost:8443", nil)
+	var safe *SafeHandoffError
+	if !errors.As(err, &safe) || safe.Code != "invalid_handoff_url" {
+		t.Fatalf("expected loopback handoff URL rejection, got %v", err)
+	}
+}
+
+func TestHTTPVerifierRejectsTamperedVerificationPathWithoutLeakingIt(t *testing.T) {
+	_, err := (HTTPVerifier{}).Verify(
+		context.Background(), "https://preview.example.ts.net:8443",
+		[]model.VerificationCheck{{Path: "/login?token=must-not-leak", MinCode: 200, MaxCode: 399}},
+	)
+	var safe *SafeHandoffError
+	if !errors.As(err, &safe) || safe.Code != "invalid_verification_check" || strings.Contains(err.Error(), "must-not-leak") {
+		t.Fatalf("expected sanitized invalid verification error, got %#v / %v", safe, err)
+	}
+}
+
+func publicTLSTestOrigin(t *testing.T, server *httptest.Server, hostname string) (string, http.RoundTripper) {
+	t.Helper()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "https://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	transport.TLSClientConfig.InsecureSkipVerify = true // #nosec G402 -- isolated TLS test server with a synthetic public hostname.
+	return "https://" + net.JoinHostPort(hostname, port), transport
+}
+
+func serverURLWithoutCredentials(r *http.Request) string {
+	return "https://" + r.Host
+}
+
+func TestErrorPayloadForPreservesWrappedSafeHandoffDetails(t *testing.T) {
+	err := fmt.Errorf("outer operation: %w", &SafeHandoffError{
+		Code: "loopback_redirect", Phase: "final_verification", Message: "unsafe redirect",
+		RedirectOrigin: "http://localhost:3000", TargetPath: "/",
+	})
+	payload := ErrorPayloadFor(err)
+	if payload.Code != "loopback_redirect" || payload.Phase != "final_verification" || payload.RedirectOrigin != "http://localhost:3000" {
+		t.Fatalf("wrapped structured details were lost: %#v", payload)
 	}
 }
 
@@ -74,9 +181,10 @@ func (f *fakeCaddy) ActiveRequests(context.Context) (map[string]int, error) {
 }
 
 type fakeTailscale struct {
-	exposed    map[int]int
-	busy       map[int]bool
-	failExpose error
+	exposed     map[int]int
+	busy        map[int]bool
+	funnelPorts map[int]bool
+	failExpose  error
 }
 
 func (f *fakeTailscale) Status(context.Context) (tailscale.Status, error) {
@@ -90,6 +198,9 @@ func (f *fakeTailscale) PortAvailable(_ context.Context, port int) (bool, error)
 	return !f.busy[port] && f.exposed[port] == 0, nil
 }
 func (f *fakeTailscale) FunnelEnabled(context.Context) (bool, error) { return false, nil }
+func (f *fakeTailscale) FunnelEnabledOnPort(_ context.Context, port int) (bool, error) {
+	return f.funnelPorts[port], nil
+}
 func (f *fakeTailscale) Expose(_ context.Context, external, gateway int) error {
 	if f.failExpose != nil {
 		err := f.failExpose
@@ -109,9 +220,14 @@ type fakeHealth struct{ err error }
 func (f fakeHealth) Wait(context.Context, []model.HealthCheck) error      { return f.err }
 func (f fakeHealth) CheckOnce(context.Context, []model.HealthCheck) error { return f.err }
 
-type fakeVerifier struct{ err error }
+type fakeVerifier struct {
+	err    error
+	report model.VerificationReport
+}
 
-func (f fakeVerifier) Verify(context.Context, string) error { return f.err }
+func (f fakeVerifier) Verify(context.Context, string, []model.VerificationCheck) (model.VerificationReport, error) {
+	return f.report, f.err
+}
 
 func newTestService(t *testing.T, now *time.Time) (*Service, *fakeCaddy, *fakeTailscale) {
 	t.Helper()
@@ -128,7 +244,7 @@ func newTestService(t *testing.T, now *time.Time) (*Service, *fakeCaddy, *fakeTa
 		t.Fatal(err)
 	}
 	fc := &fakeCaddy{active: map[string]int{}}
-	ft := &fakeTailscale{exposed: map[int]int{}, busy: map[int]bool{}}
+	ft := &fakeTailscale{exposed: map[int]int{}, busy: map[int]bool{}, funnelPorts: map[int]bool{}}
 	service := &Service{
 		Store:     state.Store{RegistryPath: paths.Registry, LockPath: paths.Lock},
 		Paths:     paths,
@@ -160,6 +276,9 @@ func TestUpAllocatesStablePortAndDownPreservesReservation(t *testing.T) {
 	if first.Preview.ExternalPort != 8443 || ts.exposed[8443] != 18080 {
 		t.Fatalf("unexpected allocation: %#v / %#v", first.Preview, ts.exposed)
 	}
+	if first.Preview.HandoffURL != first.Preview.URL || len(first.Preview.Verify) != 1 {
+		t.Fatalf("safe handoff fields missing: %#v", first.Preview)
+	}
 	if _, err := service.Down(context.Background(), first.Preview.Name); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +289,68 @@ func TestUpAllocatesStablePortAndDownPreservesReservation(t *testing.T) {
 	}
 	if second.Preview.ExternalPort != 8443 {
 		t.Fatalf("expected stable port, got %d", second.Preview.ExternalPort)
+	}
+}
+
+func TestCheckRevalidatesRegisteredPreviewAndPersistsTimestamp(t *testing.T) {
+	now := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	service, _, _ := newTestService(t, &now)
+	result, err := service.Up(context.Background(), UpRequest{Config: testConfig(t.TempDir()), Name: "check-me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedAt := now.Add(time.Minute)
+	service.Verifier = fakeVerifier{report: model.VerificationReport{
+		VerifiedAt: verifiedAt,
+		Checks:     []model.VerificationResult{{Path: "/", StatusCode: 200, FinalOrigin: result.Preview.HandoffURL}},
+	}}
+	checked, err := service.Check(context.Background(), result.Preview.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked.Action != "check" || checked.Preview.LastVerifiedAt == nil || !checked.Preview.LastVerifiedAt.Equal(verifiedAt) {
+		t.Fatalf("unexpected check result: %#v", checked)
+	}
+	previews, err := service.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(previews) != 1 || previews[0].LastVerifiedAt == nil || !previews[0].LastVerifiedAt.Equal(verifiedAt) {
+		t.Fatalf("verification timestamp was not persisted: %#v", previews)
+	}
+}
+
+func TestCheckDetectsMissingServeListener(t *testing.T) {
+	now := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	service, _, ts := newTestService(t, &now)
+	result, err := service.Up(context.Background(), UpRequest{Config: testConfig(t.TempDir()), Name: "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(ts.exposed, result.Preview.ExternalPort)
+	_, err = service.Check(context.Background(), result.Preview.Name)
+	var safe *SafeHandoffError
+	if !errors.As(err, &safe) || safe.Code != "serve_listener_missing" {
+		t.Fatalf("expected missing listener error, got %v", err)
+	}
+}
+
+func TestCheckRejectsFunnelOnlyOnTheRegisteredPort(t *testing.T) {
+	now := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	service, _, ts := newTestService(t, &now)
+	result, err := service.Up(context.Background(), UpRequest{Config: testConfig(t.TempDir()), Name: "private-only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.funnelPorts[result.Preview.ExternalPort+1] = true
+	if _, err := service.Check(context.Background(), result.Preview.Name); err != nil {
+		t.Fatalf("unrelated Funnel port must not fail this preview: %v", err)
+	}
+	ts.funnelPorts[result.Preview.ExternalPort] = true
+	_, err = service.Check(context.Background(), result.Preview.Name)
+	var safe *SafeHandoffError
+	if !errors.As(err, &safe) || safe.Code != "public_endpoint_detected" {
+		t.Fatalf("expected exact-port Funnel rejection, got %v", err)
 	}
 }
 
